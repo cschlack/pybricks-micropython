@@ -15,6 +15,11 @@
 #include <pybricks/experimental.h>
 #include <pybricks/robotics.h>
 
+#include <pbdrv/clock.h>
+
+#include <stm32f4xx_hal_pcd.h>
+#include <stm32f4xx_hal_pcd_ex.h>
+
 #if PYBRICKS_HUB_EV3BRICK
 #if !MICROPY_MODULE_BUILTIN_INIT
 #error "pybricks.experimental module requires that MICROPY_MODULE_BUILTIN_INIT is enabled"
@@ -48,6 +53,115 @@ STATIC mp_obj_t mod_experimental_pthread_raise(mp_obj_t thread_id_in, mp_obj_t e
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(mod_experimental_pthread_raise_obj, mod_experimental_pthread_raise);
 #endif // PYBRICKS_HUB_EV3BRICK
+
+void HAL_PCDEx_BCD_VBUSDetectHACKED(PCD_HandleTypeDef *hpcd) {
+    USB_OTG_GlobalTypeDef *USBx = hpcd->Instance;
+    uint32_t tickstart = pbdrv_clock_get_ms();
+
+
+    PCD_BCD_MsgTypeDef result = PCD_BCD_DISCOVERY_COMPLETED;
+
+    /* Start BCD When device is connected */
+
+    // HACK: Be lazy and call it in a loop instead of interrupt.
+    // But this way we can debug print with ease...
+
+    if (1 /* USBx_DEVICE->DCTL & USB_OTG_DCTL_SDIS */) {
+        /* Enable DCD : Data Contact Detect */
+        USBx->GCCFG |= USB_OTG_GCCFG_DCDEN;
+
+        /* Wait Detect flag or a timeout is happen*/
+        while ((USBx->GCCFG & USB_OTG_GCCFG_DCDET) == 0U) {
+            /* Check for the Timeout */
+            if ((pbdrv_clock_get_ms() - tickstart) > 1000U) {
+                mp_printf(&mp_plat_print, "open cable\n");
+                return;
+            }
+        }
+
+        /* Right response got */
+        mp_hal_delay_ms(100U);
+
+        /* Check Detect flag*/
+        if (USBx->GCCFG & USB_OTG_GCCFG_DCDET) {
+            result = PCD_BCD_CONTACT_DETECTION;
+        }
+        else {
+            mp_printf(&mp_plat_print, "Nothing\n");
+            return;
+        }
+
+        /*Primary detection: checks if connected to Standard Downstream Port
+        (without charging capability) */
+        USBx->GCCFG &= ~USB_OTG_GCCFG_DCDEN;
+        USBx->GCCFG |= USB_OTG_GCCFG_PDEN;
+        mp_hal_delay_ms(100U);
+
+        if (!(USBx->GCCFG & USB_OTG_GCCFG_PDET)) {
+            /* Case of Standard Downstream Port */
+            result = PCD_BCD_STD_DOWNSTREAM_PORT;
+        } else {
+            /* start secondary detection to check connection to Charging Downstream
+            Port or Dedicated Charging Port */
+            USBx->GCCFG &= ~USB_OTG_GCCFG_PDEN;
+            USBx->GCCFG |= USB_OTG_GCCFG_SDEN;
+            mp_hal_delay_ms(100U);
+
+            if ((USBx->GCCFG) & USB_OTG_GCCFG_SDET) {
+                /* case Dedicated Charging Port  */
+                result = PCD_BCD_DEDICATED_CHARGING_PORT;
+            } else {
+                /* case Charging Downstream Port  */
+                result = PCD_BCD_CHARGING_DOWNSTREAM_PORT;
+            }
+        }
+
+        if (result) {
+            mp_printf(&mp_plat_print, "Detected: ");
+            switch (result)
+            {
+            case PCD_BCD_STD_DOWNSTREAM_PORT:
+                mp_printf(&mp_plat_print, "PCD_BCD_STD_DOWNSTREAM_PORT\n");
+                break;
+            case PCD_BCD_CHARGING_DOWNSTREAM_PORT:
+                mp_printf(&mp_plat_print, "PCD_BCD_CHARGING_DOWNSTREAM_PORT\n");
+                break;
+            case PCD_BCD_DEDICATED_CHARGING_PORT:
+                mp_printf(&mp_plat_print, "PCD_BCD_DEDICATED_CHARGING_PORT\n");
+                break;
+            default:
+                mp_printf(&mp_plat_print, "Unknown\n");
+                break;
+            }
+        }
+        else {
+            mp_printf(&mp_plat_print, "???\n");
+        }
+    }
+}
+
+STATIC mp_obj_t experimental_detect(void) {
+
+    extern PCD_HandleTypeDef hpcd;
+
+    // If we don't do this then detection only works
+    // the very first time. Maybe there is a particular
+    // flag that needs to be unset by another HAL function.
+    // or maybe that HAL function is just broken, but we'll
+    // be rewriting our own process anyway.
+    hpcd.Instance->GCCFG = 0;
+
+    // Not sure we need call this every time
+    HAL_PCDEx_ActivateBCD(&hpcd);
+    
+    HAL_PCDEx_BCD_VBUSDetectHACKED(&hpcd);
+
+    // Not sure we need call this every time
+    HAL_PCDEx_DeActivateBCD(&hpcd);
+
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(experimental_detect_obj, experimental_detect);
 
 
 // pybricks.experimental.hello_world
@@ -98,6 +212,7 @@ STATIC const mp_rom_map_elem_t experimental_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_experimental) },
     #endif // PYBRICKS_HUB_EV3BRICK
     { MP_ROM_QSTR(MP_QSTR_hello_world), MP_ROM_PTR(&experimental_hello_world_obj) },
+    { MP_ROM_QSTR(MP_QSTR_detect), MP_ROM_PTR(&experimental_detect_obj) },
 };
 STATIC MP_DEFINE_CONST_DICT(pb_module_experimental_globals, experimental_globals_table);
 
